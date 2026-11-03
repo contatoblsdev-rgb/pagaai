@@ -2,6 +2,7 @@ name: APK Android
 
 # Gera o APK do PagaAí a cada atualização no main e publica em Releases.
 # Também dá para rodar à mão: Actions → APK Android → Run workflow.
+# Senha da assinatura: secret KEYSTORE_PASSWORD.
 on:
   push:
     branches: [main]
