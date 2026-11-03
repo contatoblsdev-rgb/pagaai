@@ -581,7 +581,7 @@ async function getTess(onProg){
   if(!tessLoading)tessLoading=(async()=>{
     if(!window.Tesseract)await loadScript("vendor/tesseract/tesseract.min.js");
     const abs=p=>new URL(p,location.href).href;
-    const w=await Tesseract.createWorker("por",1,{workerPath:abs("vendor/tesseract/worker.min.js"),corePath:abs("vendor/tesseract/"),langPath:abs("vendor/lang"),gzip:true,workerBlobURL:false,
+    const w=await Tesseract.createWorker("por",1,{workerPath:abs("vendor/tesseract/worker.min.js"),corePath:abs("vendor/tesseract/"),langPath:abs("vendor/lang"),gzip:!NATIVE /* no APK o Android descompacta o .gz */,workerBlobURL:false,
       logger:m=>{if(tessWorker&&m.status==="recognizing text"&&window.__tessProg)window.__tessProg(m.progress)}});
     await w.setParameters({tessedit_pageseg_mode:"6",preserve_interword_spaces:"1"});
     tessWorker=w;return w})();
