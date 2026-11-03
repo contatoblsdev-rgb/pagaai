@@ -1,7 +1,7 @@
 // PagaAí — service worker: abre offline; dados ficam no aparelho; leitor grátis fica em cache.
-const VERSION = "pagaai-v7";
+const VERSION = "pagaai-v8";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-192.png", "icon-512.png", "apple-touch-icon.png",
-  "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"];
+  "vendor/jspdf.umd.min.js", "vendor/tesseract/tesseract.min.js", "vendor/tesseract/worker.min.js", "vendor/lang/por.traineddata.gz"];
 const CACHEABLE = u => u.startsWith(self.location.origin) || u.includes("fonts.g") || u.includes("cdnjs.cloudflare.com") || u.includes("cdn.jsdelivr.net");
 
 self.addEventListener("install", e => {

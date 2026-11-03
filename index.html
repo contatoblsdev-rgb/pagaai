@@ -15,7 +15,7 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
 <style>
 /* Layout: coluna única de bolso — cabeçalho com total e saldo do adiantamento, gráfico de saldo por dia, despesas agrupadas por dia, barra de ação fixa */
 :root{
@@ -197,6 +197,10 @@ share:'<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13"
 function toast(msg,ms=2600){document.querySelectorAll(".toast").forEach(t=>t.remove());const t=el("div",{class:"toast",role:"status"},msg);document.body.append(t);setTimeout(()=>t.remove(),ms)}
 const CFG={get(){try{return JSON.parse(localStorage.getItem("pagaai_cfg")||"{}")}catch(_){return{}}},set(v){try{localStorage.setItem("pagaai_cfg",JSON.stringify(Object.assign(this.get(),v)))}catch(_){}}};
 
+/* ---------- app Android (Capacitor) ---------- */
+const NATIVE=!!(window.Capacitor&&window.Capacitor.isNativePlatform&&window.Capacitor.isNativePlatform());
+const Plug=n=>NATIVE&&window.Capacitor.Plugins?window.Capacitor.Plugins[n]:null;
+
 /* ---------- IndexedDB: tudo fica no aparelho, sem login ---------- */
 const DB={db:null,
   open(){return new Promise((res,rej)=>{const q=indexedDB.open("pagaai",1);q.onupgradeneeded=()=>{const d=q.result;d.createObjectStore("reports",{keyPath:"id"});const s=d.createObjectStore("items",{keyPath:"id"});s.createIndex("rid","rid")};q.onsuccess=()=>{this.db=q.result;res()};q.onerror=()=>rej(q.error)})},
@@ -354,7 +358,7 @@ function reportSheet(r,focusAdto){
         await DB.putReport(rec);sc.remove();await loadReports();
         if(isNew)openReport(rec);else{S.current=rec;renderReport()}
       }},isNew?"Abrir prestação":"Salvar")));
-  setTimeout(()=>(focusAdto?a:t).focus(),60);
+  setTimeout(()=>{if(!sc.contains(document.activeElement))(focusAdto?a:t).focus()},60);
 }
 function deleteReportSheet(r){
   const sc=sheet(el("h2",{},"Excluir “"+r.titulo+"”?"),el("p",{class:"note",style:"margin:0"},"Todas as notas e fotos desta prestação serão apagadas deste aparelho. Gere o PDF antes, se precisar."),
@@ -575,8 +579,9 @@ function loadScript(src){return new Promise((res,rej)=>{const sc=document.create
 async function getTess(onProg){
   if(tessWorker)return tessWorker;
   if(!tessLoading)tessLoading=(async()=>{
-    if(!window.Tesseract)await loadScript("https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js");
-    const w=await Tesseract.createWorker("por",1,{langPath:"https://cdn.jsdelivr.net/npm/@tesseract.js-data/por@1.0.0/4.0.0_best_int",gzip:true,
+    if(!window.Tesseract)await loadScript("vendor/tesseract/tesseract.min.js");
+    const abs=p=>new URL(p,location.href).href;
+    const w=await Tesseract.createWorker("por",1,{workerPath:abs("vendor/tesseract/worker.min.js"),corePath:abs("vendor/tesseract/"),langPath:abs("vendor/lang"),gzip:true,workerBlobURL:false,
       logger:m=>{if(tessWorker&&m.status==="recognizing text"&&window.__tessProg)window.__tessProg(m.progress)}});
     await w.setParameters({tessedit_pageseg_mode:"6",preserve_interword_spaces:"1"});
     tessWorker=w;return w})();
@@ -636,7 +641,7 @@ async function runOCR(blob,f,setAc){
   if(modo==="claude"&&!navigator.onLine){show("low","Sem internet. Preencha à mão; a foto fica salva.");return}
   const ac=new AbortController();setAc(ac);const typed={val:f.val.value,est:f.est.value};
   const prog=t=>{if(!ac.signal.aborted)show("run",el("span",{class:"spin"}),t+" Pode digitar se preferir.")};
-  prog(modo==="local"?(tessWorker?"Lendo a nota no celular…":"Baixando o leitor (só na primeira vez)…"):"Lendo a nota…");
+  prog(modo==="local"?(tessWorker?"Lendo a nota no celular…":"Preparando o leitor…"):"Lendo a nota…");
   try{
     const out=modo==="local"?await lerLocal(blob,prog):await lerClaude(blob,cfg,ac.signal);
     if(ac.signal.aborted)return;
@@ -671,7 +676,7 @@ async function runOCR(blob,f,setAc){
     if(out.confianca==="baixa"||!(out.valor_total>0))show("low",(out.aviso||"Não consegui ler o total com segurança. Confira a foto e digite.")+alcMsg);
     else show(out.confianca==="alta"&&!/confira|Atenção|marque/.test(alcMsg)?"ok":"low",(out.confianca==="alta"?quem:"Leitura parcial.")+alcMsg+" Confira antes de salvar.");
   }catch(err){if(err&&err.name==="AbortError")return;
-    show("low",err&&err.user?err.message:modo==="local"?"Não consegui ler a nota no celular. Preencha à mão. Na primeira vez é preciso internet para baixar o leitor.":"Não consegui ler a nota. Preencha à mão.")}
+    show("low",err&&err.user?err.message:modo==="local"?"Não consegui ler a nota no celular. Preencha à mão.":"Não consegui ler a nota. Preencha à mão.")}
 }
 
 function settingsSheet(){
@@ -683,7 +688,7 @@ function settingsSheet(){
   const sync=()=>{claudeBox.hidden=modo.value!=="claude"};modo.addEventListener("change",sync);sync();
   const xa=el("select",{id:"cf_x"},el("option",{value:"1",selected:cfg.excluirAlcool!==false},"Sim, tirar do reembolso"),el("option",{value:"0",selected:cfg.excluirAlcool===false},"Não"));
   const sc=sheet(el("h2",{},"Ajustes"),
-    fld("Leitura das notas",modo,"No celular é grátis e funciona sem internet depois do primeiro uso. Fotografe a nota de perto e reta."),claudeBox,
+    fld("Leitura das notas",modo,"No celular é grátis e funciona sem internet. Fotografe a nota de perto e reta."),claudeBox,
     fld("Retirar bebidas alcoólicas das notas",xa),
     el("p",{class:"note",style:"margin:0"},"Suas prestações, notas e fotos ficam só neste aparelho. Apagar os dados do navegador ou desinstalar o app apaga tudo, então gere o PDF de cada prestação finalizada."),
     el("div",{class:"actions"},el("button",{class:"btn second",onclick:()=>sc.remove()},"Cancelar"),el("button",{class:"btn primary",onclick:()=>{CFG.set({leitura:modo.value,apiKey:k.value.trim(),model:m.value,excluirAlcool:xa.value==="1"});sc.remove();toast("Ajustes salvos")}},"Salvar")));
@@ -795,8 +800,20 @@ async function buildPDF(){
   return {blob:doc.output("blob"),name};
 }
 async function exportPDF(){
-  if(!window.jspdf){toast("Gerador de PDF não carregou. Abra o app com internet uma vez.");return}
+  if(!window.jspdf){toast("Gerador de PDF não carregou. Feche e abra o app de novo.");return}
   let out;try{out=await buildPDF()}catch(e){toast("Não consegui gerar o PDF");return}
+  if(NATIVE){
+    const FS=Plug("Filesystem"),SH=Plug("Share");
+    let uri=null;
+    try{const b64=(await blobToDataURL(out.blob)).split(",")[1];
+      const w=await FS.writeFile({path:out.name,data:b64,directory:"CACHE"});uri=w.uri}
+    catch(e){toast("Não consegui salvar o PDF no aparelho");return}
+    const enviar=async()=>{try{await SH.share({title:out.name,dialogTitle:"Enviar ou salvar o PDF",files:[uri]})}catch(_){}};
+    const sc=sheet(el("h2",{},"PDF pronto"),el("p",{class:"note",style:"margin:0"},out.name+" · "+(out.blob.size/1048576).toLocaleString("pt-BR",{maximumFractionDigits:1})+" MB"),
+      el("p",{class:"note",style:"margin:0"},"Escolha WhatsApp, e-mail ou Drive. Para guardar no celular, escolha \"Salvar no Drive\" ou o app Arquivos."),
+      el("div",{class:"actions"},el("button",{class:"btn second",onclick:()=>sc.remove()},"Fechar"),el("button",{class:"btn primary",onclick:async()=>{await enviar();sc.remove()}},ico(I.share),"Enviar / Salvar")));
+    return;
+  }
   const file=new File([out.blob],out.name,{type:"application/pdf"});
   const share=navigator.canShare&&navigator.canShare({files:[file]});
   const download=()=>{const u=URL.createObjectURL(out.blob);const a=el("a",{href:u,download:out.name});document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),4000)};
@@ -833,7 +850,14 @@ $("#btnAjustes").append(ico(I.gear));$("#btnAjustes").addEventListener("click",s
   const open=S.reports.find(r=>r.status==="aberta");
   if(open)openReport(open);else renderList();
 })();
-if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));
+if(!NATIVE&&"serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));
+/* botão Voltar do Android: fecha a janela aberta, depois volta à lista, depois sai */
+if(NATIVE&&Plug("App"))Plug("App").addListener("backButton",async()=>{
+  const sc=[...document.querySelectorAll(".scrim")].pop();
+  if(sc){sc.click();if(document.body.contains(sc))sc.remove();return}
+  if(S.current){await loadReports();renderList();return}
+  Plug("App").exitApp();
+});
 })();
 </script>
 </body>

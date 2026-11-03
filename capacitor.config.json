@@ -1,0 +1,10 @@
+{
+  "appId": "com.blsdev.pagaai",
+  "appName": "PagaAí",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

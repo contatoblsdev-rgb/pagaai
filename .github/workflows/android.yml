@@ -1,0 +1,81 @@
+name: APK Android
+
+# Gera o APK do PagaAí a cada atualização no main e publica em Releases.
+# Também dá para rodar à mão: Actions → APK Android → Run workflow.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+      VERSION_NAME: 1.0.${{ github.run_number }}
+    steps:
+      - name: Conferir a senha da assinatura
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error title=Falta o secret KEYSTORE_PASSWORD::Crie em Settings > Secrets and variables > Actions > New repository secret (nome KEYSTORE_PASSWORD) e rode de novo."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Preparar o app web
+        run: |
+          npm ci
+          npm run sync
+
+      - name: Abrir a chave de assinatura
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in android/pagaai.keystore.enc -out android/app/pagaai.keystore -pass env:KEYSTORE_PASSWORD
+
+      - name: Compilar o APK
+        working-directory: android
+        env:
+          KEYSTORE_PATH: pagaai.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: pagaai
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          cp app/build/outputs/apk/release/app-release.apk "../PagaAi-${VERSION_NAME}.apk"
+          rm -f app/pagaai.keystore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PagaAi-${{ env.VERSION_NAME }}
+          path: PagaAi-*.apk
+
+      - name: Publicar em Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION_NAME}" "PagaAi-${VERSION_NAME}.apk" \
+            --title "PagaAí ${VERSION_NAME}" \
+            --notes "APK do PagaAí ${VERSION_NAME}. No Android: baixe o arquivo .apk e toque para instalar. Instala por cima da versão anterior sem apagar suas prestações." \
+            --latest

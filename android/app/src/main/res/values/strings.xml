@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PagaAí</string>
+    <string name="title_activity_main">PagaAí</string>
+    <string name="package_name">com.blsdev.pagaai</string>
+    <string name="custom_url_scheme">com.blsdev.pagaai</string>
+</resources>

@@ -3,27 +3,29 @@
 Prestação de contas no celular: fotografe as notas, o app lê total, data, pagamentos,
 gorjeta e bebidas alcoólicas, acompanha o saldo do adiantamento e gera o PDF com todas as notas.
 
-PWA estático, sem login: os dados ficam no próprio aparelho (IndexedDB). Leitura das notas grátis, no celular.
+Sem login: os dados ficam no próprio aparelho. Leitura das notas grátis, no celular, sem internet.
 
-## Arquivos
+## Android (APK)
+Cada atualização no `main` gera um APK novo em **Releases** (`PagaAi-1.0.N.apk`).
+No celular: abra a release mais recente, baixe o `.apk` e toque para instalar
+(na 1ª vez o Android pede para permitir instalar apps desta fonte).
+Versões novas instalam por cima e mantêm as prestações.
+
+Configuração única: **Settings → Secrets and variables → Actions → New repository secret**,
+nome `KEYSTORE_PASSWORD`, valor = a senha da chave de assinatura. Guarde essa senha:
+sem ela não dá para gerar atualizações que instalem por cima.
+
+## iPhone / navegador (PWA)
+Os arquivos da raiz são o app web. Publicado no Cloudflare Pages (preset None, build vazio,
+output `/`). No iPhone: Safari → Compartilhar → Adicionar à Tela de Início.
+
+## Estrutura
 - `index.html` — o app inteiro
-- `manifest.webmanifest`, `sw.js`, ícones — instalação como app
-
-## 1. Publicar (Cloudflare Pages)
-Repositório no GitHub com estes arquivos na raiz → Cloudflare → Workers & Pages → Create →
-Pages → Import Git → preset **None**, build vazio, output `/`.
-
-## 2. Instalar
-iPhone (Safari): Compartilhar → Adicionar à Tela de Início. Android (Chrome): ⋮ → Instalar app.
-
-## Leitura das notas
-- **No celular (padrão, grátis):** na 1ª nota baixa o leitor (~5 MB) e depois funciona offline.
-  Fotografe de perto, reto, com a nota inteira e boa luz.
-- **Claude (opcional, pago):** em Ajustes, para cupons muito apagados.
-
-## Atualizar
-Suba os arquivos novos. Ao mudar algo além do `index.html`, troque `VERSION` no `sw.js`.
+- `vendor/` — leitor de notas (Tesseract), dados de português e gerador de PDF, embutidos
+- `android/` — projeto Android (Capacitor); `npm run sync` copia o app web para dentro dele
+- `.github/workflows/android.yml` — compila e publica o APK
+- `sw.js`, `manifest.webmanifest`, ícones — instalação como PWA
 
 ## Atenção
-Os dados ficam só no aparelho. Apagar os dados do navegador ou desinstalar o app apaga as
-prestações. Gere o PDF de cada prestação finalizada.
+Os dados ficam só no aparelho. Desinstalar o app ou limpar os dados apaga as prestações.
+Gere o PDF de cada prestação finalizada.
