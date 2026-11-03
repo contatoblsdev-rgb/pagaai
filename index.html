@@ -472,7 +472,7 @@ function parseCupom(raw){
   const norm=t=>t.normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
   const rawLines=raw.split(/\r?\n/).filter(l=>l.trim());const lines=rawLines.map(l=>l.replace(/\s+/g," ").trim());
   const N=lines.map(norm);
-  const MONEY=/(?<![\d,])(\d{1,3}(?:\.\d{3})+|\d+),(\d{2})(?!\d)/g;
+  const MONEY=/(?<![\d,.])(\d{1,3}(?:\.\d{3})+|\d+)[,.](\d{2})(?!\d)/g;
   const nums=l=>[...l.matchAll(MONEY)].map(m=>parseFloat(m[1].replace(/\./g,"")+"."+m[2]));
   const last=l=>{const a=nums(l);return a.length?a[a.length-1]:null};
   const lastOrNext=i=>{let v=last(N[i]);if(v==null&&i+1<N.length)v=last(N[i+1]);return v};
@@ -480,8 +480,8 @@ function parseCupom(raw){
   const r2=v=>Math.round(v*100)/100;
 
   /* totais */
-  const iPagar=find(/VALOR\s*A\s*PAGAR|\bA\s+PAGAR\b/);
-  const iTotal=(()=>{for(let i=0;i<N.length;i++)if(/VAL[O0]R\s*TOTAL|^TOTAL\b/.test(N[i])&&!/SUBTOTAL|TOTAL DE ITENS|TRIBUT/.test(N[i]))return i;return -1})();
+  const iPagar=find(/AL[O0]R\s*A\s*PAGAR|\bA\s+PAGAR\b/);
+  const iTotal=(()=>{for(let i=0;i<N.length;i++)if(/AL[O0]R\s*TOTAL|^TOTAL\b/.test(N[i])&&!/SUBTOTAL|TOTAL DE ITENS|TRIBUT/.test(N[i]))return i;return -1})();
   const iSub=find(/SUBTOTAL/);
   const vPagar=iPagar>=0?lastOrNext(iPagar):null,vTotal=iTotal>=0?lastOrNext(iTotal):null;
 
@@ -492,14 +492,16 @@ function parseCupom(raw){
     const v=last(N[i]);if(v==null||v<=0)continue;
     const t=N[i];let forma=/P[I1T]X/.test(t)?"PIX":/DEB/.test(t)?"Débito":/CRED/.test(t)?"Crédito":/DINH/.test(t)?"Dinheiro":/VALE|\bVR\b|\bVA\b|ALIMENT|REFEI/.test(t)?"Vale":t.replace(MONEY,"").replace(/[^A-Z ]/g," ").replace(/\s+/g," ").trim().slice(0,20)||"Pagamento";
     pags.push({forma,valor:v});}}
+  if(!pags.length){const from=Math.max(iTotal,iPagar);if(from>=0)for(let i=from+1;i<Math.min(N.length,from+7);i++){
+    const t=N[i];if(/CONSULT|CHAVE|CONSUMIDOR|TRIBUT|HTTP|WWW|PROTOCOLO/.test(t))break;
+    if(!/P[I1T]X|CART|DEBIT|CREDIT|DINHEIR|VALE/.test(t)||/TROCO/.test(t))continue;
+    const v=last(t);if(v==null||v<=0)continue;
+    pags.push({forma:/P[I1T]X/.test(t)?"PIX":/DEB/.test(t)?"Débito":/CRED/.test(t)?"Crédito":/DINH/.test(t)?"Dinheiro":"Vale",valor:v})}}
   const pagSum=r2(pags.reduce((s,p)=>s+p.valor,0));
 
   /* total final, conferido com a soma dos pagamentos */
-  let valor=vPagar||vTotal,conf="media";
+  let valor=vPagar||vTotal||(pags.length?pagSum:null),conf="media";
   const near=(a,b)=>a!=null&&b!=null&&Math.abs(a-b)<0.02;
-  if(pags.length&&near(pagSum,valor))conf="alta";
-  else if(pags.length>=2||(pags.length===1&&valor==null)){valor=pagSum;conf="media"}
-  else if(pags.length===1&&valor!=null&&!near(pagSum,valor)){conf="baixa"}
 
   /* data */
   let data=null;
@@ -522,7 +524,9 @@ function parseCupom(raw){
   const cand=i=>{const raw=lines[i].replace(/CNPJ.*$/i,"");const c=clean(raw);if(!c)return null;const n=norm(raw);if(ADDR.test(n)&&!BUS.test(n))return null;
     const letters=(raw.match(/[A-Za-zÀ-ÿ\s]/g)||[]).length/Math.max(1,raw.length);if(letters<0.6)return null;
     const cw=c.split(" ");if(cw.reduce((s,w)=>s+w.length,0)/cw.length<3.5)return null;return c};
-  for(let i=iCnpj-1;i>=Math.max(0,iCnpj-6)&&!estab;i--)estab=cand(i);
+  const UF=/[-,]\s*(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b/;
+  for(let i=Math.max(0,iCnpj-7);i<iCnpj&&!estab;i++){const n=norm(lines[i]);if(/LTDA|EIRELI|\bS\.?\s?A\b|\bME\b|\bEPP\b|COMERCIO|RESTAUR|LANCHON|PADARIA|POSTO|HOTEL|POUSADA/.test(n)&&!UF.test(n)&&!/CNPJ|DOCUMENTO/.test(n))estab=cand(i)}
+  for(let i=iCnpj-1;i>=Math.max(0,iCnpj-6)&&!estab;i--){if(UF.test(norm(lines[i])))continue;estab=cand(i)}
   if(!estab&&iCnpj>=0){const c=clean(lines[iCnpj].replace(/^.*?\d{2}\s*$/,""));if(c)estab=c}
   if(estab){estab=estab.split(" ").map((w,k)=>/^(DE|DA|DO|DOS|DAS|E)$/i.test(w)&&k?w.toLowerCase():w.length>3?w[0].toUpperCase()+w.slice(1).toLowerCase():w.toUpperCase()).join(" ").slice(0,40)}
 
@@ -561,6 +565,29 @@ function parseCupom(raw){
     const g=N[i].split(/\s+/).filter(w=>/^\d{4,5}$/.test(w)).map(w=>w.slice(-4));if(!g.length&&d)break;d+=g.join("")}
     if(d.length===44)chave=d;}
 
+  /* total por votação: o valor em que total, valor a pagar, pagamentos e itens concordam */
+  {
+    const valLine=re=>{const i=find(re);return i>=0?lastOrNext(i):null};
+    const desc=valLine(/^DESC[O0]NT[O0]|\bDESCONTO\b/)||0;
+    const acr=(()=>{for(let i=0;i<N.length;i++){if(/ACR\w*SC/.test(N[i])&&!/SOBRE|ITEM/.test(N[i]))return last(N[i])||0}return 0})();
+    let itensSum=null;
+    if(iHead>=0){let s=0,n=0;
+      for(let i=iHead+1;i<iEnd;i++){const t=N[i];
+        if(temLiquido){if(/LIQUID/.test(t)){const v=last(t);if(v){s+=v;n++}}continue}
+        if(/AC\w*SC|DESC/.test(t))continue;const v=last(t);if(v){s+=v;n++}}
+      if(n)itensSum=r2(s);}
+    const cand=[];const add=(v,w,src)=>{if(v!=null&&v>0&&isFinite(v))cand.push({v:r2(v),w,src})};
+    if(pags.length)add(pagSum,2,"pagamentos");
+    add(vPagar,1.5,"a pagar");
+    add(vTotal!=null?(vPagar!=null||!desc?vTotal:vTotal-desc):null,1,"total");
+    if(desc&&vTotal!=null)add(vTotal-desc,0.5,"total-desconto");
+    const sub=iSub>=0?last(N[iSub]):null;if(sub&&acr)add(sub+acr,1,"subtotal+acrescimo");
+    if(itensSum!=null)add(itensSum+(temLiquido?0:acr)-desc,1,"itens");
+    const grupos=[];for(const c of cand){const g=grupos.find(g=>near(g.v,c.v));if(g){g.w+=c.w;g.n++}else grupos.push({v:c.v,w:c.w,n:1})}
+    grupos.sort((a,b)=>b.w-a.w);
+    if(grupos.length){valor=grupos[0].v;conf=grupos[0].n>=2?"alta":grupos.length===1?"media":"baixa"}
+  }
+
   /* categoria */
   const all=N.join(" ");
   const cat=/ETANOL|GASOLINA|DIESEL|\bGNV\b|POSTO|COMBUST/.test(all)?"Combustível":
@@ -568,13 +595,13 @@ function parseCupom(raw){
     /ESTACION|ESTAPAR|PARKING|ZONA AZUL|\bPARK\b/.test(all)?"Estacionamento":
     /HOTEL|POUSADA|HOSPED|DIARIA/.test(all)?"Hospedagem":
     /\bUBER\b|\b99\s?(POP|TAXI)\b|TAXI|CABIFY|PASSAGEM|RODOVIARIA|METRO\b/.test(all)?"Transporte/Táxi/App":
-    (itens.length||/RESTAUR|\bBAR\b|LANCH|PIZZ|STEAK|BURGER|CHURRAS|PADAR|CAFE|GORJETA|COMANDA|MESA|REFEIC|BRASA|PETISC/.test(all))?"Alimentação":
+    (itens.length||/RESTAUR|\bBAR\b|LANCH|PIZZ|STEAK|BURGER|CHURRAS|PADAR|CAFE|GORJETA|COMANDA|MESA|REFEIC|BRASA|PETISC|PAO DE|QUEIJO|SALGAD|LANCHE|ALMOCO|JANTAR|SANDU|PRATO|MARMIT|SELF|COMA A VONTADE|RODIZIO|ALIMENTOS|ENERGETICO|REFRIG|SUCO|BEB /.test(all))?"Alimentação":
     /FERRAG|MATERIA|ELETRIC|PARAFUS|HIDRAUL|TINTAS/.test(all)?"Material/Peças":"Outros";
 
   return{estabelecimento:estab,cnpj,data,valor_total:valor,categoria:cat,itens_alcool:itens,gorjeta_valor:gorjeta,taxa_servico_percentual:null,
     pagamentos:pags,chave_acesso:chave,numero_nota:null,confianca:valor?conf:"baixa",
     aviso:valor?null:"Não achei o total no cupom. Confira a foto e digite o valor.",
-    _check:{vPagar,vTotal,pagSum,sub:iSub>=0?last(N[iSub]):null}};
+    _check:{vPagar,vTotal,pagSum}};
 }
 
 /* motor grátis: Tesseract no aparelho (baixado na 1ª vez, depois fica em cache) */
