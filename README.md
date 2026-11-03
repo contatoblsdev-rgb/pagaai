@@ -1,35 +1,29 @@
 # PagaAí
 
-Prestação de contas no celular: fotografe as notas, o app lê valor/data/estabelecimento,
-acompanha o saldo do adiantamento dia a dia e gera o PDF com total, acerto e todas as notas.
+Prestação de contas no celular: fotografe as notas, o app lê total, data, pagamentos,
+gorjeta e bebidas alcoólicas, acompanha o saldo do adiantamento e gera o PDF com todas as notas.
 
-PWA estático (HTML + JS), sem servidor. Os dados ficam no próprio aparelho (IndexedDB).
+PWA estático, sem login: os dados ficam no próprio aparelho (IndexedDB). Leitura das notas grátis, no celular.
 
 ## Arquivos
 - `index.html` — o app inteiro
-- `manifest.webmanifest` — nome, ícone e cores para instalar na tela inicial
-- `sw.js` — service worker (abre offline)
-- `icon-*.png`, `apple-touch-icon.png` — ícones
+- `manifest.webmanifest`, `sw.js`, ícones — instalação como app
 
-## Publicar (Cloudflare Pages, grátis)
-1. Crie o repositório `PagaAi` no GitHub e suba estes arquivos na raiz.
-2. Cloudflare → Workers & Pages → Create → Pages → Connect to Git → escolha o repositório.
-3. Framework preset: **None**. Build command: vazio. Output directory: `/`.
-4. Deploy. O app fica em `https://pagaai.pages.dev` (ou no domínio que você apontar).
+## 1. Publicar (Cloudflare Pages)
+Repositório no GitHub com estes arquivos na raiz → Cloudflare → Workers & Pages → Create →
+Pages → Import Git → preset **None**, build vazio, output `/`.
 
-## Instalar no celular
-- iPhone (Safari): Compartilhar → **Adicionar à Tela de Início**.
-- Android (Chrome): menu ⋮ → **Instalar app**.
+## 2. Instalar
+iPhone (Safari): Compartilhar → Adicionar à Tela de Início. Android (Chrome): ⋮ → Instalar app.
 
-## Leitura automática das notas
-Em **Ajustes**, cole uma chave da API do Claude (console.anthropic.com → API Keys).
-A chave fica só no aparelho e é enviada direto para a API da Anthropic. Uso pessoal: não
-distribua o app com a sua chave dentro. Cada nota custa frações de centavo com o Haiku.
+## Leitura das notas
+- **No celular (padrão, grátis):** na 1ª nota baixa o leitor (~5 MB) e depois funciona offline.
+  Fotografe de perto, reto, com a nota inteira e boa luz.
+- **Claude (opcional, pago):** em Ajustes, para cupons muito apagados.
 
 ## Atualizar
-Edite e faça push. Ao mudar arquivos além do `index.html`, troque `VERSION` em `sw.js`
-(ex.: `pagaai-v2`) para os celulares baixarem a versão nova.
+Suba os arquivos novos. Ao mudar algo além do `index.html`, troque `VERSION` no `sw.js`.
 
 ## Atenção
-Os dados ficam só no aparelho. Apagar dados do navegador ou desinstalar o app apaga as
+Os dados ficam só no aparelho. Apagar os dados do navegador ou desinstalar o app apaga as
 prestações. Gere o PDF de cada prestação finalizada.

@@ -197,18 +197,19 @@ share:'<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13"
 function toast(msg,ms=2600){document.querySelectorAll(".toast").forEach(t=>t.remove());const t=el("div",{class:"toast",role:"status"},msg);document.body.append(t);setTimeout(()=>t.remove(),ms)}
 const CFG={get(){try{return JSON.parse(localStorage.getItem("pagaai_cfg")||"{}")}catch(_){return{}}},set(v){try{localStorage.setItem("pagaai_cfg",JSON.stringify(Object.assign(this.get(),v)))}catch(_){}}};
 
-/* ---------- IndexedDB: tudo fica no aparelho ---------- */
+/* ---------- IndexedDB: tudo fica no aparelho, sem login ---------- */
 const DB={db:null,
   open(){return new Promise((res,rej)=>{const q=indexedDB.open("pagaai",1);q.onupgradeneeded=()=>{const d=q.result;d.createObjectStore("reports",{keyPath:"id"});const s=d.createObjectStore("items",{keyPath:"id"});s.createIndex("rid","rid")};q.onsuccess=()=>{this.db=q.result;res()};q.onerror=()=>rej(q.error)})},
   tx(store,mode,fn){return new Promise((res,rej)=>{const t=this.db.transaction(store,mode);const s=t.objectStore(store);let out;const r=fn(s);if(r)r.onsuccess=()=>{out=r.result};t.oncomplete=()=>res(out);t.onerror=()=>rej(t.error)})},
   reports(){return this.tx("reports","readonly",s=>s.getAll())},
   putReport(r){return this.tx("reports","readwrite",s=>s.put(r))},
   items(rid){return this.tx("items","readonly",s=>s.index("rid").getAll(rid))},
-  putItem(i){return this.tx("items","readwrite",s=>s.put(i))},
   allItems(){return this.tx("items","readonly",s=>s.getAll())},
+  putItem(i){const d=Object.assign({},i);delete d._dup;delete d._dupOk;delete d._sub;delete d._n;return this.tx("items","readwrite",s=>s.put(d))},
   delItem(id){return this.tx("items","readwrite",s=>s.delete(id))},
   async delReport(r){const its=await this.items(r.id);for(const i of its)await this.delItem(i.id);return this.tx("reports","readwrite",s=>s.delete(r.id))}
 };
+async function fotoBlob(it){return it.foto instanceof Blob?it.foto:null}
 
 /* Bebidas: soma dos itens + a parte da gorjeta/serviço que incide sobre elas.
    fator = gorjeta / (total pago - gorjeta) quando a gorjeta vem em linha própria; ou pct/100. */
@@ -428,7 +429,8 @@ function itemSheet(it,ocrBlob){
   const cat=el("select",{id:"it_c",disabled:locked},CATS.map(c=>el("option",{value:c,selected:c===it.categoria},c)));
   const obs=el("input",{id:"it_o",value:it.obs||"",placeholder:"Ex.: jantar com equipe",disabled:locked});
   const status=el("div",{class:"ocr",hidden:true});
-  let url=null;const photo=it.foto?el("div",{class:"photo"},el("img",{src:(url=URL.createObjectURL(it.foto)),alt:"Foto da nota"})):null;
+  let url=null;const photoImg=el("img",{alt:"Foto da nota"});const photo=(it.foto||it.fotoPath)?el("div",{class:"photo"},photoImg):null;
+  if(photo)fotoBlob(it).then(b=>{if(b){url=URL.createObjectURL(b);photoImg.src=url}});
   const saveBtn=el("button",{class:"btn primary"},"Salvar nota");
   const close=()=>{sc.remove();if(url)URL.revokeObjectURL(url);ac&&ac.abort()};
   let ac=null;
@@ -456,13 +458,139 @@ function itemSheet(it,ocrBlob){
 
 /* ---------- leitura da nota (Claude API, chave do próprio usuário) ---------- */
 const blobToB64=b=>new Promise((res,rej)=>{const f=new FileReader();f.onload=()=>res(String(f.result).split(",")[1]);f.onerror=rej;f.readAsDataURL(b)});
-async function runOCR(blob,f,setAc){
-  const st=f.status;const show=(cls,...k)=>{st.className="ocr "+cls;st.replaceChildren(...k);st.hidden=false};
-  const cfg=CFG.get();
-  if(!cfg.apiKey){show("low","Leitura automática desligada. Coloque sua chave da API em Ajustes, ou preencha à mão.");return}
-  if(!navigator.onLine){show("low","Sem internet. Preencha à mão; a foto fica salva.");return}
-  show("run",el("span",{class:"spin"}),"Lendo a nota… pode digitar se preferir.");
-  const ac=new AbortController();setAc(ac);const typed={val:f.val.value,est:f.est.value};
+/* PARSER_START */
+/* Leitura grátis: interpreta o texto do OCR do cupom (NFC-e) com regras. */
+function parseCupom(raw){
+  const norm=t=>t.normalize("NFD").replace(/[̀-ͯ]/g,"").toUpperCase();
+  const rawLines=raw.split(/\r?\n/).filter(l=>l.trim());const lines=rawLines.map(l=>l.replace(/\s+/g," ").trim());
+  const N=lines.map(norm);
+  const MONEY=/(?<![\d,])(\d{1,3}(?:\.\d{3})+|\d+),(\d{2})(?!\d)/g;
+  const nums=l=>[...l.matchAll(MONEY)].map(m=>parseFloat(m[1].replace(/\./g,"")+"."+m[2]));
+  const last=l=>{const a=nums(l);return a.length?a[a.length-1]:null};
+  const lastOrNext=i=>{let v=last(N[i]);if(v==null&&i+1<N.length)v=last(N[i+1]);return v};
+  const find=(re,from=0,to=N.length)=>{for(let i=from;i<to;i++)if(re.test(N[i]))return i;return -1};
+  const r2=v=>Math.round(v*100)/100;
+
+  /* totais */
+  const iPagar=find(/VALOR\s*A\s*PAGAR|\bA\s+PAGAR\b/);
+  const iTotal=(()=>{for(let i=0;i<N.length;i++)if(/VAL[O0]R\s*TOTAL|^TOTAL\b/.test(N[i])&&!/SUBTOTAL|TOTAL DE ITENS|TRIBUT/.test(N[i]))return i;return -1})();
+  const iSub=find(/SUBTOTAL/);
+  const vPagar=iPagar>=0?lastOrNext(iPagar):null,vTotal=iTotal>=0?lastOrNext(iTotal):null;
+
+  /* pagamentos */
+  const pags=[];const iForma=find(/F[O0]R\w?A\s*DE\s*PAG/);
+  if(iForma>=0){for(let i=iForma+1;i<Math.min(N.length,iForma+10);i++){
+    if(/CONSULT|CHAVE|TROCO|TRIBUT|HTTP|WWW|PROTOCOLO/.test(N[i]))break;
+    const v=last(N[i]);if(v==null||v<=0)continue;
+    const t=N[i];let forma=/P[I1T]X/.test(t)?"PIX":/DEB/.test(t)?"Débito":/CRED/.test(t)?"Crédito":/DINH/.test(t)?"Dinheiro":/VALE|\bVR\b|\bVA\b|ALIMENT|REFEI/.test(t)?"Vale":t.replace(MONEY,"").replace(/[^A-Z ]/g," ").replace(/\s+/g," ").trim().slice(0,20)||"Pagamento";
+    pags.push({forma,valor:v});}}
+  const pagSum=r2(pags.reduce((s,p)=>s+p.valor,0));
+
+  /* total final, conferido com a soma dos pagamentos */
+  let valor=vPagar||vTotal,conf="media";
+  const near=(a,b)=>a!=null&&b!=null&&Math.abs(a-b)<0.02;
+  if(pags.length&&near(pagSum,valor))conf="alta";
+  else if(pags.length>=2||(pags.length===1&&valor==null)){valor=pagSum;conf="media"}
+  else if(pags.length===1&&valor!=null&&!near(pagSum,valor)){conf="baixa"}
+
+  /* data */
+  let data=null;
+  for(const pref of [/EMISS/,/NFC|SERIE|SERI/,/./]){for(let i=0;i<N.length&&!data;i++){if(!pref.test(N[i])&&!(pref.source==="."))continue;
+    const m=N[i].match(/\b(\d{2})\/(\d{2})\/(20\d{2})\b/);if(m&&+m[1]<=31&&+m[2]<=12)data=m[3]+"-"+m[2]+"-"+m[1];}if(data)break}
+
+  /* CNPJ */
+  let cnpj=null,iCnpj=-1;
+  for(let i=0;i<N.length;i++){const m=N[i].match(/(\d{2})[.,\s]?(\d{3})[.,\s]?(\d{3})\s?\/\s?(\d{4})[-\s]?(\d{2})/)||(/CNP/.test(N[i])&&N[i].match(/\b(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})\b/));
+    if(m){cnpj=m[1]+"."+m[2]+"."+m[3]+"/"+m[4]+"-"+m[5];iCnpj=i;break}
+    if(iCnpj<0&&/CNPJ|\/0001/.test(N[i]))iCnpj=i;}
+  if(iCnpj<0)iCnpj=Math.min(8,N.length);
+
+  /* nome do estabelecimento: linha antes do CNPJ que não é endereço */
+  const BUS=/LTDA|POSTO|BAR\b|RESTAUR|HOTEL|POUSADA|LANCH|PIZZ|STEAK|S\.?\s?A\b|EIRELI|\bME\b/;
+  const ADDR=/\bAV\b|AVENIDA|\bRUA\b|ESTRADA|RODOVIA|\bROD\b|\bKM\b|\bCEP\b|JANEIRO|PAULO|BAIRRO|CENTRO|SHOPPING|PISO|\bLUC\b|\bLOJ|RECRE|BANDEIR|FONE|\bTEL\b|USUARIO|OPERADOR|COMANDA|VENDA|MESA|DOCUMENTO|AUXILIAR|CONSUMIDOR/;
+  const clean=l=>l.split(" ").filter(w=>(w.match(/[A-ZÀ-Ü]/gi)||[]).length>=3&&/^[^\d]*$/.test(w)).map(w=>w.replace(/[^A-Za-zÀ-ÿ&'-]/g,"")).filter(w=>w.length>=3).join(" ")
+    .replace(/\b(LTDA|EIRELI|EPP|ME)\b/gi,"").replace(/\s+/g," ").trim();
+  let estab=null;
+  const cand=i=>{const raw=lines[i].replace(/CNPJ.*$/i,"");const c=clean(raw);if(!c)return null;const n=norm(raw);if(ADDR.test(n)&&!BUS.test(n))return null;
+    const letters=(raw.match(/[A-Za-zÀ-ÿ\s]/g)||[]).length/Math.max(1,raw.length);if(letters<0.6)return null;
+    const cw=c.split(" ");if(cw.reduce((s,w)=>s+w.length,0)/cw.length<3.5)return null;return c};
+  for(let i=iCnpj-1;i>=Math.max(0,iCnpj-6)&&!estab;i--)estab=cand(i);
+  if(!estab&&iCnpj>=0){const c=clean(lines[iCnpj].replace(/^.*?\d{2}\s*$/,""));if(c)estab=c}
+  if(estab){estab=estab.split(" ").map((w,k)=>/^(DE|DA|DO|DOS|DAS|E)$/i.test(w)&&k?w.toLowerCase():w.length>3?w[0].toUpperCase()+w.slice(1).toLowerCase():w.toUpperCase()).join(" ").slice(0,40)}
+
+  /* itens: região entre o cabeçalho e os totais */
+  const iHead=find(/DESCR|DESCRI|CODIGO|\bCOD\b/);
+  const iEnd=(()=>{for(let i=Math.max(0,iHead+1);i<N.length;i++)if(/TOTAL DE ITENS|QTD\.? ?TOTAL|QTDE\.? ?TOTAL|VAL[O0]R\s*TOTAL|SUBTOTAL|VALOR A PAGAR/.test(N[i]))return i;return N.length})();
+  const ALC=/\b(CH[O0D]P+E?|CHOPE|CERVEJ\w*|BRAHMA|SKOL|HEINEKEN|HEIN|STELLA|CORONA|BUDWEISER|BUD|AMSTEL|SPATEN|EISENBAHN|ITAIPAVA|PETRA|COLORADO|BADEN|DEVASSA|BOHEMIA|ANTARCTICA|PATAGONIA|LONG ?NECK|LN|LITRAO|BALDE|CANECA|VINHO|TACA|ESPUMANTE|PROSECCO|SIDRA|SAQUE|CAIPIR\w*|CAIPIROSK\w*|DRINKS?|COQUETEL|GIN|APEROL|MOJITO|NEGRONI|DOSE|VODKA|WHISK\w*|CACHACA|PINGA|RUM|TEQUILA|LICOR|CONHAQUE|HAPPY)\b/;
+  const NOTALC=/SEM ALC|S\/ ?ALC|ZERO ALC|\b0[.,]0\b|ETANOL|GASOLINA|DIESEL|ALCOOL GEL|ALCOOL 70|REFRI|SUCO|AGUA|ICE TEA|\bCHA\b|MOCKTAIL|\bH2O/;
+  const DUV=/^(HEIN|LN|BUD|GIN|BALDE|TACA|DOSE)$/;
+  const isItemStart=t=>/[A-Z]{4,}/.test(t.replace(/AC\w*SC\w*|S[UO]BRE|ITEM|VAL[O0]R|LIQUID\w*/g,""));
+  const temLiquido=N.some(t=>/LIQUID/.test(t));
+  const itens=[];
+  if(iHead>=0)for(let i=iHead+1;i<iEnd;i++){
+    const t=N[i];const m=t.match(ALC);if(!m||NOTALC.test(t)||/G\w?RJ\w?TA|GORJ|SERVICO/.test(t))continue;
+    let v=null;
+    for(let k=i+1;k<=Math.min(iEnd-1,i+3);k++){if(isItemStart(N[k])&&!/LIQUID|AC\w*SC/.test(N[k]))break;
+      if(/LIQUID/.test(N[k])){v=last(N[k]);if(v==null&&k-1>i)v=last(N[k-1]);break}}
+    if(v==null){const a=nums(t);if(a.length>=1)v=a[a.length-1];}
+    if(v==null&&i+1<iEnd&&!isItemStart(N[i+1]))v=last(N[i+1]);
+    if(v==null||v<=0||(valor&&v>valor))continue;
+    const ri=rawLines.indexOf(rawLines.find((x,k)=>x.replace(/\s+/g," ").trim()===lines[i]));
+    const chunk=(rawLines[ri]||lines[i]).split(/\s{3,}/).find(ch=>/[A-Za-z]{3,}/.test(ch))||lines[i];
+    const desc=chunk.split(" ").filter(Boolean).reduce((a,w)=>(a.length||/[A-Za-zÀ-ÿ]{2,}/.test(w)&&!/\d/.test(w))?a.concat(w):a,[]).join(" ").replace(/[^\wÀ-ÿ\s.\/-]/g,"").replace(/\s+/g," ").trim().slice(0,40);
+    itens.push({descricao:desc||m[1],valor:r2(v),duvida:DUV.test(m[1])||/CH[0D]P/.test(m[1])});
+  }
+
+  /* gorjeta / serviço (não conta se o acréscimo já está em cada item) */
+  let gorjeta=null;
+  if(!temLiquido){for(let i=0;i<N.length;i++){const t=N[i];if(/ACRESCIMO SOBRE|SOBRE ITEM/.test(t))continue;
+    if(/G\w?RJ\w?TA|GORJ|TAXA DE SERV|TX\.? ?SERV|\bSERVICO\b|COUVERT/.test(t)&&!/COUVERT/.test(t)){gorjeta=lastOrNext(i);if(gorjeta!=null)break}
+    if(/^ACRESC/.test(t)&&i>iEnd-1){gorjeta=last(t);if(gorjeta!=null)break}}}
+
+  /* chave de acesso: 11 grupos de 4 dígitos */
+  let chave=null;const iCh=find(/CHAVE/);
+  if(iCh>=0){let d="";for(let i=iCh+1;i<Math.min(N.length,iCh+5)&&d.length<44;i++){
+    const g=N[i].split(/\s+/).filter(w=>/^\d{4,5}$/.test(w)).map(w=>w.slice(-4));if(!g.length&&d)break;d+=g.join("")}
+    if(d.length===44)chave=d;}
+
+  /* categoria */
+  const all=N.join(" ");
+  const cat=/ETANOL|GASOLINA|DIESEL|\bGNV\b|POSTO|COMBUST/.test(all)?"Combustível":
+    /PEDAGIO|AUTOBAN|ECOVIAS|ARTERIS|CONCESSIONARIA|SEM PARAR|CONECTCAR/.test(all)?"Pedágio":
+    /ESTACION|ESTAPAR|PARKING|ZONA AZUL|\bPARK\b/.test(all)?"Estacionamento":
+    /HOTEL|POUSADA|HOSPED|DIARIA/.test(all)?"Hospedagem":
+    /\bUBER\b|\b99\s?(POP|TAXI)\b|TAXI|CABIFY|PASSAGEM|RODOVIARIA|METRO\b/.test(all)?"Transporte/Táxi/App":
+    (itens.length||/RESTAUR|\bBAR\b|LANCH|PIZZ|STEAK|BURGER|CHURRAS|PADAR|CAFE|GORJETA|COMANDA|MESA|REFEIC|BRASA|PETISC/.test(all))?"Alimentação":
+    /FERRAG|MATERIA|ELETRIC|PARAFUS|HIDRAUL|TINTAS/.test(all)?"Material/Peças":"Outros";
+
+  return{estabelecimento:estab,cnpj,data,valor_total:valor,categoria:cat,itens_alcool:itens,gorjeta_valor:gorjeta,taxa_servico_percentual:null,
+    pagamentos:pags,chave_acesso:chave,numero_nota:null,confianca:valor?conf:"baixa",
+    aviso:valor?null:"Não achei o total no cupom. Confira a foto e digite o valor.",
+    _check:{vPagar,vTotal,pagSum,sub:iSub>=0?last(N[iSub]):null}};
+}
+
+/* motor grátis: Tesseract no aparelho (baixado na 1ª vez, depois fica em cache) */
+let tessWorker=null,tessLoading=null;
+function loadScript(src){return new Promise((res,rej)=>{const sc=document.createElement("script");sc.src=src;sc.onload=res;sc.onerror=()=>rej(new Error("script"));document.head.append(sc)})}
+async function getTess(onProg){
+  if(tessWorker)return tessWorker;
+  if(!tessLoading)tessLoading=(async()=>{
+    if(!window.Tesseract)await loadScript("https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js");
+    const w=await Tesseract.createWorker("por",1,{langPath:"https://cdn.jsdelivr.net/npm/@tesseract.js-data/por@1.0.0/4.0.0_best_int",gzip:true,
+      logger:m=>{if(tessWorker&&m.status==="recognizing text"&&window.__tessProg)window.__tessProg(m.progress)}});
+    await w.setParameters({tessedit_pageseg_mode:"6",preserve_interword_spaces:"1"});
+    tessWorker=w;return w})();
+  try{return await tessLoading}catch(e){tessLoading=null;throw e}
+}
+async function lerLocal(blob,onProg){
+  onProg("Preparando o leitor…");
+  const w=await getTess();
+  window.__tessProg=p=>onProg("Lendo a nota no celular… "+Math.round(p*100)+"%");
+  const {data}=await w.recognize(blob);
+  window.__tessProg=null;
+  return parseCupom(data.text||"");
+}
+async function lerClaude(blob,cfg,signal){
   const prompt=`Você lê fotos de comprovantes de despesa brasileiros (NFC-e, cupom fiscal, nota fiscal, recibo, ticket de pedágio/estacionamento, comprovante de cartão).
 Responda SOMENTE com JSON, sem texto antes ou depois:
 {"estabelecimento": string|null, "cnpj": string|null, "data": "AAAA-MM-DD"|null, "valor_total": number|null, "categoria": string,
@@ -494,18 +622,30 @@ OUTROS
 - pagamentos: cada linha de FORMA DE PAGAMENTO com seu valor, na ordem da nota (ex.: [{"forma":"Cartão de Crédito","valor":126.55},{"forma":"PIX","valor":252}]). Repita linhas iguais (dois PIX = dois itens). Lista vazia se não houver.
 - chave_acesso: os 44 dígitos da chave de acesso da NFC-e, só números, se legível; senão null. numero_nota: número da NFC-e/nota.
 - confianca "baixa" se ilegível, cortada ou não for comprovante; explique em "aviso" numa frase curta.`;
+  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",signal,headers:{"content-type":"application/json","x-api-key":cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({model:cfg.model||MODELS[0][0],max_tokens:1200,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:await blobToB64(blob)}},{type:"text",text:prompt}]}]})});
+  if(!res.ok){const e=new Error({401:"Chave da API inválida. Confira em Ajustes.",429:"Muitas leituras seguidas ou sem crédito na API. Preencha à mão."}[res.status]||"A leitura falhou ("+res.status+"). Preencha à mão.");e.user=true;throw e}
+  const j=await res.json();const txt=(j.content||[]).map(c=>c.text||"").join("");
+  return JSON.parse(txt.slice(txt.indexOf("{"),txt.lastIndexOf("}")+1));
+}
+async function runOCR(blob,f,setAc){
+  const st=f.status;const show=(cls,...k)=>{st.className="ocr "+cls;st.replaceChildren(...k);st.hidden=false};
+  const cfg=CFG.get();const modo=cfg.leitura||"local";
+  if(modo==="off")return;
+  if(modo==="claude"&&!cfg.apiKey){show("low","Leitura pelo Claude sem chave. Coloque a chave em Ajustes ou mude para leitura no celular.");return}
+  if(modo==="claude"&&!navigator.onLine){show("low","Sem internet. Preencha à mão; a foto fica salva.");return}
+  const ac=new AbortController();setAc(ac);const typed={val:f.val.value,est:f.est.value};
+  const prog=t=>{if(!ac.signal.aborted)show("run",el("span",{class:"spin"}),t+" Pode digitar se preferir.")};
+  prog(modo==="local"?(tessWorker?"Lendo a nota no celular…":"Baixando o leitor (só na primeira vez)…"):"Lendo a nota…");
   try{
-    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",signal:ac.signal,headers:{"content-type":"application/json","x-api-key":cfg.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-      body:JSON.stringify({model:cfg.model||MODELS[0][0],max_tokens:1200,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:await blobToB64(blob)}},{type:"text",text:prompt}]}]})});
-    if(!res.ok){const m={401:"Chave da API inválida. Confira em Ajustes.",429:"Muitas leituras seguidas ou sem crédito na API. Preencha à mão."}[res.status];show("low",m||"A leitura falhou ("+res.status+"). Preencha à mão.");return}
-    const j=await res.json();const txt=(j.content||[]).map(c=>c.text||"").join("");
-    const out=JSON.parse(txt.slice(txt.indexOf("{"),txt.lastIndexOf("}")+1));
+    const out=modo==="local"?await lerLocal(blob,prog):await lerClaude(blob,cfg,ac.signal);
+    if(ac.signal.aborted)return;
     if(f.val.value===typed.val&&out.valor_total>0)f.val.value=moneyInput(out.valor_total);
     if(out.data&&/^\d{4}-\d{2}-\d{2}$/.test(out.data))f.dt.value=out.data;
     if(f.est.value===typed.est&&out.estabelecimento)f.est.value=out.estabelecimento;
     if(out.categoria&&CATS.includes(out.categoria))f.cat.value=out.categoria;
     if(out.cnpj)f.it.cnpj=out.cnpj;
-    const cfgA=CFG.get();const alcOn=cfgA.excluirAlcool!==false;
+    const alcOn=cfg.excluirAlcool!==false;
     const itensA=Array.isArray(out.itens_alcool)?out.itens_alcool.filter(x=>x&&Number(x.valor)>0&&!/\b(etanol|gasolina|diesel|alcool gel|álcool gel)\b/i.test(x.descricao||"")).map(x=>({descricao:String(x.descricao||"Bebida"),valor:r2(x.valor),duvida:!!x.duvida})):[];
     let alcMsg="";
     if(alcOn&&itensA.length){
@@ -516,31 +656,37 @@ OUTROS
     const pags=Array.isArray(out.pagamentos)?out.pagamentos.filter(p=>p&&Number(p.valor)>0).map(p=>({forma:String(p.forma||"Pagamento").replace(/cart[aã]o de /i,""),valor:r2(p.valor),sel:false})):[];
     f.it.pagamentos=pags;
     if(pags.length>1){f.it.dividida=true;f.it.pessoas=pags.length;f.minha.value="";alcMsg+=" Conta paga em "+pags.length+" partes: marque a sua.";}
-    f.renderSplit();f.recalc();
+    f.renderSplit();
     const chave=String(out.chave_acesso||"").replace(/\D/g,"");
     f.it.chave=chave.length===44?chave:null;f.it.numeroNota=out.numero_nota?String(out.numero_nota).replace(/\D/g,"").replace(/^0+/,""):null;
     try{
-      const all=await DB.allItems();const cn=String(out.cnpj||"").replace(/\D/g,"");
-      const dup=all.find(x=>(f.it.chave&&x.chave===f.it.chave)||(f.it.numeroNota&&cn&&x.numeroNota===f.it.numeroNota&&String(x.cnpj||"").replace(/\D/g,"")===cn));
-      if(dup){const rp=S.reports.find(r=>r.id===dup.rid);f.it._dup=rp?rp.titulo:"outra prestação";alcMsg+=" Atenção: esta nota já foi lançada em “"+f.it._dup+"”."}
+      const all=await DB.allItems();
+      const quase=(a,b)=>{if(!a||!b||a.length!==b.length)return false;let d=0;for(let i=0;i<a.length;i++)if(a[i]!==b[i]&&++d>4)return false;return true};
+      const tot=r2(out.valor_total);
+      const dup=all.find(x=>x.id!==f.it.id&&(quase(f.it.chave,x.chave)||(out.data&&x.data===out.data&&tot>0&&Math.abs((x.valorNota!=null?x.valorNota:x.valor)-tot)<0.015)));
+      if(dup){const rp=S.reports.find(r=>r.id===dup.rid);f.it._dup=rp?rp.titulo:"outra prestação";alcMsg+=" Atenção: parece que esta nota já foi lançada em “"+f.it._dup+"”."}
     }catch(_){}
     f.recalc();
-    if(out.confianca==="baixa"||!(out.valor_total>0))show("low",out.aviso||"Não consegui ler o valor com segurança. Confira e preencha.");
-    else show(out.confianca==="alta"&&!/confira|Atenção|marque/.test(alcMsg)?"ok":"low",(out.confianca==="alta"?"Nota lida.":"Leitura parcial.")+alcMsg+" Confira antes de salvar.");
-  }catch(err){if(err&&err.name==="AbortError")return;show("low","Não consegui ler a nota. Preencha à mão.")}
+    const quem=modo==="local"?"Nota lida no celular.":"Nota lida.";
+    if(out.confianca==="baixa"||!(out.valor_total>0))show("low",(out.aviso||"Não consegui ler o total com segurança. Confira a foto e digite.")+alcMsg);
+    else show(out.confianca==="alta"&&!/confira|Atenção|marque/.test(alcMsg)?"ok":"low",(out.confianca==="alta"?quem:"Leitura parcial.")+alcMsg+" Confira antes de salvar.");
+  }catch(err){if(err&&err.name==="AbortError")return;
+    show("low",err&&err.user?err.message:modo==="local"?"Não consegui ler a nota no celular. Preencha à mão. Na primeira vez é preciso internet para baixar o leitor.":"Não consegui ler a nota. Preencha à mão.")}
 }
 
 function settingsSheet(){
   const cfg=CFG.get();
+  const modo=el("select",{id:"cf_l"},[["local","No celular (grátis)"],["claude","Claude (pago, lê melhor cupom apagado)"],["off","Desligada (digito o valor)"]].map(([v,l])=>el("option",{value:v,selected:(cfg.leitura||"local")===v},l)));
   const k=el("input",{id:"cf_k",type:"password",autocomplete:"off",placeholder:"sk-ant-…",value:cfg.apiKey||""});
-  const xa=el("select",{id:"cf_x"},el("option",{value:"1",selected:cfg.excluirAlcool!==false},"Sim, tirar do reembolso"),el("option",{value:"0",selected:cfg.excluirAlcool===false},"Não"));
   const m=el("select",{id:"cf_m"},MODELS.map(([v,l])=>el("option",{value:v,selected:(cfg.model||MODELS[0][0])===v},l)));
+  const claudeBox=el("div",{style:"display:flex;flex-direction:column;gap:12px"},fld("Chave da API do Claude",k,"Fica guardada só neste aparelho. Crie em console.anthropic.com."),fld("Modelo",m));
+  const sync=()=>{claudeBox.hidden=modo.value!=="claude"};modo.addEventListener("change",sync);sync();
+  const xa=el("select",{id:"cf_x"},el("option",{value:"1",selected:cfg.excluirAlcool!==false},"Sim, tirar do reembolso"),el("option",{value:"0",selected:cfg.excluirAlcool===false},"Não"));
   const sc=sheet(el("h2",{},"Ajustes"),
-    fld("Chave da API do Claude",k,"Usada só para ler as notas. Fica guardada apenas neste aparelho. Crie em console.anthropic.com."),
-    fld("Modelo de leitura",m),
+    fld("Leitura das notas",modo,"No celular é grátis e funciona sem internet depois do primeiro uso. Fotografe a nota de perto e reta."),claudeBox,
     fld("Retirar bebidas alcoólicas das notas",xa),
-    el("p",{class:"note",style:"margin:0"},"Tudo (prestações, notas e fotos) fica salvo neste aparelho. Gere o PDF de cada prestação para ter uma cópia fora dele."),
-    el("div",{class:"actions"},el("button",{class:"btn second",onclick:()=>sc.remove()},"Cancelar"),el("button",{class:"btn primary",onclick:()=>{CFG.set({apiKey:k.value.trim(),model:m.value,excluirAlcool:xa.value==="1"});sc.remove();toast("Ajustes salvos")}},"Salvar")));
+    el("p",{class:"note",style:"margin:0"},"Suas prestações, notas e fotos ficam só neste aparelho. Apagar os dados do navegador ou desinstalar o app apaga tudo, então gere o PDF de cada prestação finalizada."),
+    el("div",{class:"actions"},el("button",{class:"btn second",onclick:()=>sc.remove()},"Cancelar"),el("button",{class:"btn primary",onclick:()=>{CFG.set({leitura:modo.value,apiKey:k.value.trim(),model:m.value,excluirAlcool:xa.value==="1"});sc.remove();toast("Ajustes salvos")}},"Salvar")));
 }
 
 function finalizeSheet(){
@@ -623,13 +769,13 @@ async function buildPDF(){
   doc.text("Colaborador"+(r.colaborador?" — "+r.colaborador:""),M,y+4.5);doc.text("Aprovação",M+sw+16,y+4.5);
   // comprovantes: todas as notas
   newPage();doc.setTextColor(...ink);doc.setFont("helvetica","bold");doc.setFontSize(12);doc.text("Comprovantes ("+items.length+")",M,y+2);y+=10;
-  const noPhoto=items.filter(i=>!i.foto);
+  const noPhoto=items.filter(i=>!i.foto&&!i.fotoPath);
   if(noPhoto.length){doc.setFont("helvetica","normal");doc.setFontSize(9);doc.setTextColor(...warn);doc.text(doc.splitTextToSize("Sem foto: "+noPhoto.map(i=>"#"+i._n+" "+(i.estabelecimento||"")).join(", "),W-2*M),M,y);y+=8}
   const boxW=W-2*M,halfH=(297-2*M-24)/2;let used=0;
-  const withPhoto=items.filter(i=>i.foto);
+  const withPhoto=items.filter(i=>i.foto||i.fotoPath);
   for(const it of withPhoto){
     toast("Montando PDF: nota "+it._n+" de "+items.length,1500);
-    const src=await blobToDataURL(it.foto);const sz=await imgSize(src);if(!sz)continue;
+    const fb=await fotoBlob(it);if(!fb)continue;const src=await blobToDataURL(fb);const sz=await imgSize(src);if(!sz)continue;
     const tall=sz[1]/sz[0]>1.7;
     if((tall&&used>0)||y+halfH>297-M){newPage();used=0}
     const H=tall?297-M-y-8:halfH;
@@ -668,7 +814,10 @@ async function onPhoto(e){
   const file=e.target.files&&e.target.files[0];e.target.value="";if(!file||!S.current)return;
   let img;try{img=await loadImg(file)}catch(_){toast("Não consegui abrir essa imagem");return}
   const foto=await toBlob(draw(img,2400),.82);
-  const ocr=await toBlob(draw(img,1600),.85);
+  const kW=Math.min(2,1600/img.naturalWidth,5000/img.naturalHeight);
+  const cv=document.createElement("canvas");cv.width=Math.round(img.naturalWidth*kW);cv.height=Math.round(img.naturalHeight*kW);
+  const cx=cv.getContext("2d");cx.fillStyle="#fff";cx.fillRect(0,0,cv.width,cv.height);cx.imageSmoothingQuality="high";cx.filter="grayscale(1) contrast(1.25)";cx.drawImage(img,0,0,cv.width,cv.height);
+  const ocr=await toBlob(cv,.88);
   const thumb=draw(img,160).toDataURL("image/jpeg",.7);
   itemSheet({foto,thumb},ocr);
 }
@@ -683,7 +832,6 @@ $("#btnAjustes").append(ico(I.gear));$("#btnAjustes").addEventListener("click",s
   await loadReports();
   const open=S.reports.find(r=>r.status==="aberta");
   if(open)openReport(open);else renderList();
-  if(!CFG.get().apiKey&&!CFG.get().avisoKey){CFG.set({avisoKey:1});setTimeout(()=>toast("Para ler as notas automaticamente, coloque sua chave da API em Ajustes",4500),800)}
 })();
 if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));
 })();
